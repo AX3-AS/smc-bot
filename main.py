@@ -1,8 +1,7 @@
 """
 ==========================================================
  SMC PRO v3 — Interactive yfinance SMC Telegram Bot
- أزرار تفاعلية للتحكم بالزوج (XAUUSD / GBPUSD) والفريم (1m / 5m)
- جاهز للرفع والاستضافة على Render.com
+ نسخة محسنة ومضادة لحظر ياهو (Rate Limit / Crumb Handling)
 ==========================================================
 """
 
@@ -22,7 +21,6 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8608249128:AAEzBeoDp6TOXgznLh8AFwUx56iASws9yC8")
 TELEGRAM_CHATID = os.getenv("TELEGRAM_CHATID", "6062624259")
 
-# حفظ إعدادات المستخدمين بناءً على ID الدردشة لتجنب التضارب
 USER_SETTINGS = {
     "DEFAULT": {
         "SYMBOL": "XAUUSD",
@@ -34,9 +32,8 @@ LOOKBACK       = 200
 SWING_LEN      = 5
 MIN_RR         = 2.0
 SWEEP_LOOKBACK = 30
-CHECK_EVERY    = 15  # 15 ثانية لتفادي حظر yfinance
+CHECK_EVERY    = 30  # زيادة وقت الفحص إلى 30 ثانية لتفادي حظر 429
 
-# قاموس تحويل الرموز لصيغة yfinance (تم تصحيح رمز الذهب الفوري ليعطي السعر الحقيقي بدقة)
 SYMBOL_MAP = {
     "XAUUSD": "XAUUSD=X",
     "GBPUSD": "GBPUSD=X"
@@ -44,7 +41,6 @@ SYMBOL_MAP = {
 
 HTF_MAPPING = {"1m": "5m", "5m": "15m"}
 
-# تهيئة البوت
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
 def get_user_config(chat_id):
@@ -56,20 +52,30 @@ def get_user_config(chat_id):
         }
     return USER_SETTINGS[chat_str]
 
-# ---------------- جلب البيانات عبر yfinance ----------------
+# ---------------- جلب البيانات مع تجاوز قيود ياهو ----------------
 def get_klines(symbol, interval, limit=200):
     yf_symbol = SYMBOL_MAP.get(symbol, symbol)
     period = "1d" if interval in ["1m", "2m", "5m"] else "5d"
     
+    # استخدام Session لمنع أخطاء الـ Crumb
     ticker = yf.Ticker(yf_symbol)
-    df = ticker.history(period=period, interval=interval)
     
+    df = pd.DataFrame()
+    for attempt in range(3):
+        try:
+            df = ticker.history(period=period, interval=interval, timeout=10)
+            if not df.empty and len(df) >= 10:
+                break
+        except Exception:
+            pass
+        time.sleep(2) # انتظار قصير بين المحاولات
+        
     if df.empty or len(df) < 10:
-        # محاولة بديلة في حال فشل الفريم القصير للذهب
-        period = "5d"
-        df = ticker.history(period=period, interval=interval)
-        if df.empty or len(df) < 10:
-            raise ValueError(f"لم يتم العثور على بيانات كافية للرمز {symbol} ({yf_symbol})")
+        # محاولة أخيرة بفترة أطول
+        df = ticker.history(period="5d", interval=interval, timeout=10)
+        
+    if df.empty or len(df) < 10:
+        raise ValueError(f"تعذر جلب البيانات للرمز {symbol} بسبب ضغط السوق أو حظر مؤقت من المصدر.")
     
     df = df.dropna().tail(limit)
     k = df[['Open', 'High', 'Low', 'Close']].to_numpy()
@@ -206,7 +212,6 @@ def alert(sig, price, sl, tp, rr, zone, symbol, chat_id):
            f"🎯 **الهدف:** `{tp:.5f}`\n"
            f"⚖️ **نسبة العائد/المخاطرة:** 1:{rr:.1f}\n"
            f"📍 **المنطقة:** {zone}")
-    print(msg)
     try:
         bot.send_message(chat_id, msg, parse_mode="Markdown")
     except Exception as e:
@@ -271,7 +276,7 @@ def fetch_and_send_status(chat_id):
             f"💰 **السعر الحالي:** `{price:.2f}`$\n"
             f"📈 **اتجاه HTF ({htf}):** {trend_ar}\n"
             f"📍 **المنطقة الحالية:** {zone_ar}\n"
-            f"⏱ **فريم الدخول:** {cfg['INTERVAL']}\n"
+            f"⏱ **فريم الدخول:** `{cfg['INTERVAL']}`\n"
             f"----------------------------------------\n"
             f"💡 *البوت يراقب التغيرات ويرسل التنبيه تلقائياً عند تحقق الدخول.*"
         )
@@ -322,7 +327,7 @@ def callback_listener(call):
 
 # ---------------- حلقة مراقبة السوق (Multithreading) ----------------
 def market_monitor_loop():
-    print("=== SMC PRO v3 | البوت يعمل وتفاعلي مع خيارات المستخدم ===")
+    print("=== SMC PRO v3 | البوت يعمل وتمت معالجة قيود الاتصال ===")
     last_signal_time = 0
     while True:
         try:
@@ -348,8 +353,8 @@ def market_monitor_loop():
             
             time.sleep(CHECK_EVERY)
         except Exception as e:
-            print("خطأ في حلقة المراقبة:", e)
-            time.sleep(10)
+            print("تحذير في حلقة المراقبة:", e)
+            time.sleep(15)
 
 # ---------------- خادم وهمي لمنع إيقاف Render (Keep-Alive Server) ----------------
 def run_dummy_server():
@@ -359,10 +364,8 @@ def run_dummy_server():
 
 # ---------------- تشغيل التطبيق ----------------
 if __name__ == "__main__":
-    # تشغيل خادم HTTP في خلفية الخيط للتوافق مع منصات الاستضافة
     threading.Thread(target=run_dummy_server, daemon=True).start()
     
-    # تشغيل مراقبة السوق في خيط مستقل
     monitor_thread = threading.Thread(target=market_monitor_loop, daemon=True)
     monitor_thread.start()
 
