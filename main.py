@@ -1,7 +1,7 @@
 """
 ==========================================================
  SMC PRO v3 — Interactive yfinance SMC Telegram Bot
- نسخة مستقرة ومصححة لمنع تداخل الأزواج والأسعار
+ نسخة محسنة لتجاوز قيود yfinance وجلب السعر الحقيقي بدقة
 ==========================================================
 """
 
@@ -14,6 +14,7 @@ import socketserver
 import numpy as np
 import pandas as pd
 import yfinance as yf
+import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
@@ -29,15 +30,21 @@ MIN_RR         = 2.0
 SWEEP_LOOKBACK = 30
 CHECK_EVERY    = 30
 
-# خريطة الرموز المباشرة والدقيقة
+# خريطة الرموز المباشرة ودعم الجلسات
 SYMBOL_MAP = {
-    "XAUUSD": "XAUUSD=X",
+    "XAUUSD": "GC=F",     # استخدام عقود الذهب الآجلة لضمان جلب السعر اللحظي الدقيق بدون حظر
     "GBPUSD": "GBPUSD=X"
 }
 
 HTF_MAPPING = {"1m": "5m", "5m": "15m"}
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
+
+# تخصيص جلسة HTTP لتجاوز حظر yfinance
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+})
 
 def get_user_config(chat_id):
     chat_str = str(chat_id)
@@ -48,31 +55,40 @@ def get_user_config(chat_id):
         }
     return USER_SETTINGS[chat_str]
 
-# ---------------- جلب البيانات المباشرة ----------------
+# ---------------- جلب البيانات المباشرة مع الجلسة المحسنة ----------------
 def get_klines(symbol, interval, limit=200):
-    yf_symbol = SYMBOL_MAP.get(symbol, "XAUUSD=X")
+    yf_symbol = SYMBOL_MAP.get(symbol, "GC=F")
     period = "1d" if interval in ["1m", "2m", "5m"] else "5d"
     
-    ticker = yf.Ticker(yf_symbol)
+    ticker = yf.Ticker(yf_symbol, session=session)
     df = pd.DataFrame()
     
     for attempt in range(3):
         try:
             df = ticker.history(period=period, interval=interval, timeout=10)
-            if not df.empty and len(df) >= 5:
+            if not df.empty and len(df) >= 3:
                 break
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(1.5)
         
-    if df.empty or len(df) < 5:
+    if df.empty or len(df) < 3:
         try:
             df = ticker.history(period="5d", interval=interval, timeout=10)
         except Exception:
             pass
             
-    if df.empty or len(df) < 5:
-        raise ValueError(f"تعذر جلب بيانات {symbol} المباشرة، يجاري إعادة المحاولة.")
+    if df.empty or len(df) < 3:
+        # محاولة بديلة لـ XAUUSD إذا فشلت العقود الآجلة
+        if symbol == "XAUUSD":
+            try:
+                ticker_alt = yf.Ticker("XAUUSD=X", session=session)
+                df = ticker_alt.history(period="1d", interval=interval, timeout=10)
+            except Exception:
+                pass
+
+    if df.empty or len(df) < 3:
+        raise ValueError(f"تعذر جلب بيانات {symbol} المباشرة، يرجى المحاولة لاحقاً.")
     
     df = df.dropna().tail(limit)
     k = df[['Open', 'High', 'Low', 'Close']].to_numpy()
@@ -270,7 +286,7 @@ def fetch_and_send_status(chat_id):
         status_msg = (
             f"📊 **التقرير اللحظي - {cfg['SYMBOL']}**\n"
             f"----------------------------------------\n"
-            f"💰 **السعر الحالي:** `{price:.2f}`$\n"
+            f"💰 **السعر الحالي:** `{price:.4f}`$\n"
             f"📈 **اتجاه HTF ({htf}):** {trend_ar}\n"
             f"📍 **المنطقة الحالية:** {zone_ar}\n"
             f"⏱ **فريم الدخول:** `{cfg['INTERVAL']}`\n"
@@ -324,7 +340,7 @@ def callback_listener(call):
 
 # ---------------- حلقة مراقبة السوق (Multithreading) ----------------
 def market_monitor_loop():
-    print("=== SMC PRO v3 | البوت يعمل ويعالج الأزواج بشكل مستقل ===")
+    print("=== SMC PRO v3 | البوت يعمل بجلسة مخصصة وسريعة ===")
     last_signal_time = 0
     while True:
         try:
@@ -346,7 +362,7 @@ def market_monitor_loop():
                     alert(sig, price, sl, tp, rr, zone, cfg["SYMBOL"], target_chat_id)
             else:
                 _, price, trend, zone = res
-                print(f"[{now_str}] [{cfg['SYMBOL']} | {cfg['INTERVAL']}] السعر: {price:.2f} | الاتجاه: {trend} | المنطقة: {zone}")
+                print(f"[{now_str}] [{cfg['SYMBOL']} | {cfg['INTERVAL']}] السعر: {price:.4f} | الاتجاه: {trend} | المنطقة: {zone}")
             
             time.sleep(CHECK_EVERY)
         except Exception as e:
