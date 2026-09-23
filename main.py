@@ -1,7 +1,7 @@
 """
 ==========================================================
  SMC PRO v3 — Interactive yfinance SMC Telegram Bot
- نسخة محسنة ومضادة لحظر ياهو (Rate Limit / Crumb Handling)
+ نسخة مستقرة ومصححة لمنع تداخل الأزواج والأسعار
 ==========================================================
 """
 
@@ -21,19 +21,15 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8608249128:AAEzBeoDp6TOXgznLh8AFwUx56iASws9yC8")
 TELEGRAM_CHATID = os.getenv("TELEGRAM_CHATID", "6062624259")
 
-USER_SETTINGS = {
-    "DEFAULT": {
-        "SYMBOL": "XAUUSD",
-        "INTERVAL": "1m"
-    }
-}
+USER_SETTINGS = {}
 
 LOOKBACK       = 200
 SWING_LEN      = 5
 MIN_RR         = 2.0
 SWEEP_LOOKBACK = 30
-CHECK_EVERY    = 30  # زيادة وقت الفحص إلى 30 ثانية لتفادي حظر 429
+CHECK_EVERY    = 30
 
+# خريطة الرموز المباشرة والدقيقة
 SYMBOL_MAP = {
     "XAUUSD": "XAUUSD=X",
     "GBPUSD": "GBPUSD=X"
@@ -47,35 +43,36 @@ def get_user_config(chat_id):
     chat_str = str(chat_id)
     if chat_str not in USER_SETTINGS:
         USER_SETTINGS[chat_str] = {
-            "SYMBOL": USER_SETTINGS["DEFAULT"]["SYMBOL"],
-            "INTERVAL": USER_SETTINGS["DEFAULT"]["INTERVAL"]
+            "SYMBOL": "XAUUSD",
+            "INTERVAL": "1m"
         }
     return USER_SETTINGS[chat_str]
 
-# ---------------- جلب البيانات مع تجاوز قيود ياهو ----------------
+# ---------------- جلب البيانات المباشرة ----------------
 def get_klines(symbol, interval, limit=200):
-    yf_symbol = SYMBOL_MAP.get(symbol, symbol)
+    yf_symbol = SYMBOL_MAP.get(symbol, "XAUUSD=X")
     period = "1d" if interval in ["1m", "2m", "5m"] else "5d"
     
-    # استخدام Session لمنع أخطاء الـ Crumb
     ticker = yf.Ticker(yf_symbol)
-    
     df = pd.DataFrame()
+    
     for attempt in range(3):
         try:
             df = ticker.history(period=period, interval=interval, timeout=10)
-            if not df.empty and len(df) >= 10:
+            if not df.empty and len(df) >= 5:
                 break
         except Exception:
             pass
-        time.sleep(2) # انتظار قصير بين المحاولات
+        time.sleep(1)
         
-    if df.empty or len(df) < 10:
-        # محاولة أخيرة بفترة أطول
-        df = ticker.history(period="5d", interval=interval, timeout=10)
-        
-    if df.empty or len(df) < 10:
-        raise ValueError(f"تعذر جلب البيانات للرمز {symbol} بسبب ضغط السوق أو حظر مؤقت من المصدر.")
+    if df.empty or len(df) < 5:
+        try:
+            df = ticker.history(period="5d", interval=interval, timeout=10)
+        except Exception:
+            pass
+            
+    if df.empty or len(df) < 5:
+        raise ValueError(f"تعذر جلب بيانات {symbol} المباشرة، يجاري إعادة المحاولة.")
     
     df = df.dropna().tail(limit)
     k = df[['Open', 'High', 'Low', 'Close']].to_numpy()
@@ -207,9 +204,9 @@ def analyze(k_entry, k_htf):
 def alert(sig, price, sl, tp, rr, zone, symbol, chat_id):
     icon, name = ("🟢", "شراء BUY") if sig == "BUY" else ("🔴", "بيع SELL")
     msg = (f"\n{icon} **إشارة جديدة: {name}** على `{symbol}`\n\n"
-           f"💵 **سعر الدخول:** `{price:.5f}`\n"
-           f"🛑 **وقف الخسارة:** `{sl:.5f}` ({abs(price-sl)/price*100:.2f}%)\n"
-           f"🎯 **الهدف:** `{tp:.5f}`\n"
+           f"💵 **سعر الدخول:** `{price:.2f}`\n"
+           f"🛑 **وقف الخسارة:** `{sl:.2f}` ({abs(price-sl)/price*100:.2f}%)\n"
+           f"🎯 **الهدف:** `{tp:.2f}`\n"
            f"⚖️ **نسبة العائد/المخاطرة:** 1:{rr:.1f}\n"
            f"📍 **المنطقة:** {zone}")
     try:
@@ -245,7 +242,7 @@ def send_welcome(message):
     cfg = get_user_config(message.chat.id)
     htf = HTF_MAPPING[cfg["INTERVAL"]]
     welcome_text = (
-        "⚙️ **لوحة تحكم بوت SMC Monitor (yfinance)**\n\n"
+        "⚙️ **لوحة تحكم بوت SMC Monitor**\n\n"
         f"🔹 **الزوج الحالي:** `{cfg['SYMBOL']}`\n"
         f"⏱ **فريم الدخول:** `{cfg['INTERVAL']}` | **الفريم الأعلى:** `{htf}`\n\n"
         "👇 *يمكنك تغيير الزوج والفريم مباشرة عبر الأزرار أدناه:*"
@@ -327,7 +324,7 @@ def callback_listener(call):
 
 # ---------------- حلقة مراقبة السوق (Multithreading) ----------------
 def market_monitor_loop():
-    print("=== SMC PRO v3 | البوت يعمل وتمت معالجة قيود الاتصال ===")
+    print("=== SMC PRO v3 | البوت يعمل ويعالج الأزواج بشكل مستقل ===")
     last_signal_time = 0
     while True:
         try:
