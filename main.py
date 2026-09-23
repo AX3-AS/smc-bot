@@ -1,7 +1,7 @@
 """
 ==========================================================
  SMC PRO v3 — Interactive yfinance SMC Telegram Bot
- نسخة محسنة لتجاوز قيود yfinance وجلب السعر الحقيقي بدقة
+ نسخة مطابقة لسعر الشارت الفوري (Spot XAUUSD=X)
 ==========================================================
 """
 
@@ -30,9 +30,9 @@ MIN_RR         = 2.0
 SWEEP_LOOKBACK = 30
 CHECK_EVERY    = 30
 
-# خريطة الرموز المباشرة ودعم الجلسات
+# استخدام الرموز الفورية (Spot) المطابقة لمنصات التداول وترايدينغ فيو
 SYMBOL_MAP = {
-    "XAUUSD": "GC=F",     # استخدام عقود الذهب الآجلة لضمان جلب السعر اللحظي الدقيق بدون حظر
+    "XAUUSD": "XAUUSD=X",
     "GBPUSD": "GBPUSD=X"
 }
 
@@ -40,7 +40,7 @@ HTF_MAPPING = {"1m": "5m", "5m": "15m"}
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# تخصيص جلسة HTTP لتجاوز حظر yfinance
+# تخصيص جلسة HTTP لتجاوز قيود yfinance وضمان جلب السعر الفوري
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -55,9 +55,9 @@ def get_user_config(chat_id):
         }
     return USER_SETTINGS[chat_str]
 
-# ---------------- جلب البيانات المباشرة مع الجلسة المحسنة ----------------
+# ---------------- جلب البيانات الفورية بدقة ----------------
 def get_klines(symbol, interval, limit=200):
-    yf_symbol = SYMBOL_MAP.get(symbol, "GC=F")
+    yf_symbol = SYMBOL_MAP.get(symbol, "XAUUSD=X")
     period = "1d" if interval in ["1m", "2m", "5m"] else "5d"
     
     ticker = yf.Ticker(yf_symbol, session=session)
@@ -78,14 +78,13 @@ def get_klines(symbol, interval, limit=200):
         except Exception:
             pass
             
-    if df.empty or len(df) < 3:
-        # محاولة بديلة لـ XAUUSD إذا فشلت العقود الآجلة
-        if symbol == "XAUUSD":
-            try:
-                ticker_alt = yf.Ticker("XAUUSD=X", session=session)
-                df = ticker_alt.history(period="1d", interval=interval, timeout=10)
-            except Exception:
-                pass
+    # محاولة احتياطية ثانية في حال تأخر الاستجابة للذهب الفوري
+    if df.empty or len(df) < 3 and symbol == "XAUUSD":
+        try:
+            ticker_alt = yf.Ticker("GC=F", session=session)
+            df = ticker_alt.history(period="1d", interval=interval, timeout=10)
+        except Exception:
+            pass
 
     if df.empty or len(df) < 3:
         raise ValueError(f"تعذر جلب بيانات {symbol} المباشرة، يرجى المحاولة لاحقاً.")
@@ -286,7 +285,7 @@ def fetch_and_send_status(chat_id):
         status_msg = (
             f"📊 **التقرير اللحظي - {cfg['SYMBOL']}**\n"
             f"----------------------------------------\n"
-            f"💰 **السعر الحالي:** `{price:.4f}`$\n"
+            f"💰 **السعر الحالي:** `{price:.2f}`$\n"
             f"📈 **اتجاه HTF ({htf}):** {trend_ar}\n"
             f"📍 **المنطقة الحالية:** {zone_ar}\n"
             f"⏱ **فريم الدخول:** `{cfg['INTERVAL']}`\n"
@@ -340,7 +339,7 @@ def callback_listener(call):
 
 # ---------------- حلقة مراقبة السوق (Multithreading) ----------------
 def market_monitor_loop():
-    print("=== SMC PRO v3 | البوت يعمل بجلسة مخصصة وسريعة ===")
+    print("=== SMC PRO v3 | البوت يعمل بأسعار Spot الدقيقة والمطابقة للشارت ===")
     last_signal_time = 0
     while True:
         try:
@@ -362,7 +361,7 @@ def market_monitor_loop():
                     alert(sig, price, sl, tp, rr, zone, cfg["SYMBOL"], target_chat_id)
             else:
                 _, price, trend, zone = res
-                print(f"[{now_str}] [{cfg['SYMBOL']} | {cfg['INTERVAL']}] السعر: {price:.4f} | الاتجاه: {trend} | المنطقة: {zone}")
+                print(f"[{now_str}] [{cfg['SYMBOL']} | {cfg['INTERVAL']}] السعر: {price:.2f} | الاتجاه: {trend} | المنطقة: {zone}")
             
             time.sleep(CHECK_EVERY)
         except Exception as e:
