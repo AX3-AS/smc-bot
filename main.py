@@ -36,9 +36,9 @@ MIN_RR         = 2.0
 SWEEP_LOOKBACK = 30
 CHECK_EVERY    = 15  # 15 ثانية لتفادي حظر yfinance
 
-# قاموس تحويل الرموز لصيغة yfinance
+# قاموس تحويل الرموز لصيغة yfinance (تم تصحيح رمز الذهب الفوري ليعطي السعر الحقيقي بدقة)
 SYMBOL_MAP = {
-    "XAUUSD": "GC=F",
+    "XAUUSD": "XAUUSD=X",
     "GBPUSD": "GBPUSD=X"
 }
 
@@ -65,7 +65,11 @@ def get_klines(symbol, interval, limit=200):
     df = ticker.history(period=period, interval=interval)
     
     if df.empty or len(df) < 10:
-        raise ValueError(f"لم يتم العثور على بيانات كافية للرمز {symbol} ({yf_symbol})")
+        # محاولة بديلة في حال فشل الفريم القصير للذهب
+        period = "5d"
+        df = ticker.history(period=period, interval=interval)
+        if df.empty or len(df) < 10:
+            raise ValueError(f"لم يتم العثور على بيانات كافية للرمز {symbol} ({yf_symbol})")
     
     df = df.dropna().tail(limit)
     k = df[['Open', 'High', 'Low', 'Close']].to_numpy()
@@ -264,7 +268,7 @@ def fetch_and_send_status(chat_id):
         status_msg = (
             f"📊 **التقرير اللحظي - {cfg['SYMBOL']}**\n"
             f"----------------------------------------\n"
-            f"💰 **السعر الحالي:** `{price:.5f}`$\n"
+            f"💰 **السعر الحالي:** `{price:.2f}`$\n"
             f"📈 **اتجاه HTF ({htf}):** {trend_ar}\n"
             f"📍 **المنطقة الحالية:** {zone_ar}\n"
             f"⏱ **فريم الدخول:** {cfg['INTERVAL']}\n"
@@ -340,7 +344,7 @@ def market_monitor_loop():
                     alert(sig, price, sl, tp, rr, zone, cfg["SYMBOL"], target_chat_id)
             else:
                 _, price, trend, zone = res
-                print(f"[{now_str}] [{cfg['SYMBOL']} | {cfg['INTERVAL']}] السعر: {price:.5f} | الاتجاه: {trend} | المنطقة: {zone}")
+                print(f"[{now_str}] [{cfg['SYMBOL']} | {cfg['INTERVAL']}] السعر: {price:.2f} | الاتجاه: {trend} | المنطقة: {zone}")
             
             time.sleep(CHECK_EVERY)
         except Exception as e:
