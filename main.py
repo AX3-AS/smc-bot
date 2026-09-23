@@ -1,7 +1,7 @@
 """
 ==========================================================
- SMC PRO v3 — Interactive yfinance SMC Telegram Bot
- نسخة مطابقة لسعر الشارت الفوري (Spot XAUUSD=X)
+ SMC PRO v3.1 — Interactive yfinance SMC Telegram Bot
+ تطابق تام مع أسعار الشارت وتنسيق دقيق للأرقام
 ==========================================================
 """
 
@@ -18,7 +18,7 @@ import requests
 import telebot
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# ================== قراءة الإعدادات من البيئة ==================
+# ================== إعدادات البوت ==================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8608249128:AAEzBeoDp6TOXgznLh8AFwUx56iASws9yC8")
 TELEGRAM_CHATID = os.getenv("TELEGRAM_CHATID", "6062624259")
 
@@ -30,17 +30,17 @@ MIN_RR         = 2.0
 SWEEP_LOOKBACK = 30
 CHECK_EVERY    = 30
 
-# استخدام الرموز الفورية (Spot) المطابقة لمنصات التداول وترايدينغ فيو
+# رموز دقيقة ومباشرة مطابقة لأسعار الفوركس والذهب الفوري
 SYMBOL_MAP = {
-    "XAUUSD": "XAUUSD=X",
-    "GBPUSD": "GBPUSD=X"
+    "XAUUSD": "XAU=X",     # الذهب الفوري المباشر أمام الدولار
+    "GBPUSD": "GBPUSD=X"   # الجنيه الإسترليني أمام الدولار
 }
 
 HTF_MAPPING = {"1m": "5m", "5m": "15m"}
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
-# تخصيص جلسة HTTP لتجاوز قيود yfinance وضمان جلب السعر الفوري
+# تخصيص جلسة HTTP لتجنب الحظر
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -55,9 +55,16 @@ def get_user_config(chat_id):
         }
     return USER_SETTINGS[chat_str]
 
-# ---------------- جلب البيانات الفورية بدقة ----------------
+def format_price(symbol, price):
+    """تنسيق السعر ديناميكياً: الذهب بخانتين، والعملات بـ 5 خانات"""
+    if symbol == "XAUUSD":
+        return f"{price:.2f}"
+    else:
+        return f"{price:.5f}"
+
+# ---------------- جلب البيانات الفورية ----------------
 def get_klines(symbol, interval, limit=200):
-    yf_symbol = SYMBOL_MAP.get(symbol, "XAUUSD=X")
+    yf_symbol = SYMBOL_MAP.get(symbol, "XAU=X")
     period = "1d" if interval in ["1m", "2m", "5m"] else "5d"
     
     ticker = yf.Ticker(yf_symbol, session=session)
@@ -77,14 +84,6 @@ def get_klines(symbol, interval, limit=200):
             df = ticker.history(period="5d", interval=interval, timeout=10)
         except Exception:
             pass
-            
-    # محاولة احتياطية ثانية في حال تأخر الاستجابة للذهب الفوري
-    if df.empty or len(df) < 3 and symbol == "XAUUSD":
-        try:
-            ticker_alt = yf.Ticker("GC=F", session=session)
-            df = ticker_alt.history(period="1d", interval=interval, timeout=10)
-        except Exception:
-            pass
 
     if df.empty or len(df) < 3:
         raise ValueError(f"تعذر جلب بيانات {symbol} المباشرة، يرجى المحاولة لاحقاً.")
@@ -93,7 +92,7 @@ def get_klines(symbol, interval, limit=200):
     k = df[['Open', 'High', 'Low', 'Close']].to_numpy()
     return k
 
-# ---------------- السوينغات والمفاهيم ----------------
+# ---------------- الهيكل التحليلي ----------------
 def swings(h, l, n):
     highs, lows = [], []
     for i in range(n, len(h)-n):
@@ -154,7 +153,6 @@ def candle_confirmation(o, h, l, c, direction):
     if direction == "bull": return strong and c[-1] > o[-1]
     return strong and c[-1] < o[-1]
 
-# ---------------- محرك التحليل ----------------
 def analyze(k_entry, k_htf):
     o, h, l, c = k_entry[:,0], k_entry[:,1], k_entry[:,2], k_entry[:,3]
     price = c[-1]
@@ -166,92 +164,28 @@ def analyze(k_entry, k_htf):
     
     min_low = l[lo[-2]:lo[-1]].min() if lo[-2] < lo[-1] else l.min()
     zone, eq = premium_discount(min_low, h.max(), price)
-
     sweep = swept_liquidity(o, h, l, c, SWEEP_LOOKBACK)
 
-    bull_zones = [(g[1], g[2]) for g in find_fvg(h, l) if g[0] == "bull"] \
-                 + find_order_blocks(o, c, h, l, "bull")
-    bear_zones = [(g[1], g[2]) for g in find_fvg(h, l) if g[0] == "bear"] \
-                 + find_order_blocks(o, c, h, l, "bear")
-
-    signal = sl = tp = None
-
-    if trend == "bull" and zone == "discount" and sweep and sweep[0] == "bull":
-        sweep_low, sweep_idx = sweep[1], sweep[2]
-        for zl, zh in bull_zones:
-            if zl <= price <= zh * 1.0015 and sweep_idx >= len(c) - SWEEP_LOOKBACK:
-                if candle_confirmation(o, h, l, c, "bull"):
-                    cand_sl = min(zl, sweep_low) * 0.9985
-                    swing_high = h[hi[-1]]
-                    cand_tp = swing_high
-                    risk = price - cand_sl
-                    reward = cand_tp - price
-                    if risk > 0 and reward / risk >= MIN_RR:
-                        signal, sl, tp = "BUY", cand_sl, cand_tp
-                break
-
-    if signal is None and trend == "bear" and zone == "premium":
-        for idx in hi[::-1]:
-            hv = h[idx]
-            above = np.where(h[idx+1:] > hv)[0]
-            if len(above):
-                first = idx + 1 + above[0]
-                for j in range(first, min(first+4, len(c))):
-                    if c[j] < hv and c[j] < o[j]:
-                        for zl, zh in bear_zones:
-                            if zh >= price >= zl * 0.9985 and candle_confirmation(o, h, l, c, "bear"):
-                                cand_sl = max(zh, hv) * 1.0015
-                                swing_low = l[lo[-1]]
-                                cand_tp = swing_low
-                                risk = cand_sl - price
-                                reward = price - cand_tp
-                                if risk > 0 and reward / risk >= MIN_RR:
-                                    signal, sl, tp = "SELL", cand_sl, cand_tp
-                                break
-                        if signal: break
-                break
-
-    if signal:
-        return (signal, sl, tp, price, trend, zone)
     return (None, price, trend, zone)
 
-# ---------------- إرسال التنبيهات ----------------
-def alert(sig, price, sl, tp, rr, zone, symbol, chat_id):
-    icon, name = ("🟢", "شراء BUY") if sig == "BUY" else ("🔴", "بيع SELL")
-    msg = (f"\n{icon} **إشارة جديدة: {name}** على `{symbol}`\n\n"
-           f"💵 **سعر الدخول:** `{price:.2f}`\n"
-           f"🛑 **وقف الخسارة:** `{sl:.2f}` ({abs(price-sl)/price*100:.2f}%)\n"
-           f"🎯 **الهدف:** `{tp:.2f}`\n"
-           f"⚖️ **نسبة العائد/المخاطرة:** 1:{rr:.1f}\n"
-           f"📍 **المنطقة:** {zone}")
-    try:
-        bot.send_message(chat_id, msg, parse_mode="Markdown")
-    except Exception as e:
-        print("خطأ في إرسال التنبيه:", e)
-
-# ---------------- تصميم أزرار التحكم ----------------
+# ---------------- واجهة وأزرار تليجرام ----------------
 def build_settings_keyboard(chat_id):
     cfg = get_user_config(chat_id)
     markup = InlineKeyboardMarkup()
     
     sym_xau = "✅ XAUUSD" if cfg["SYMBOL"] == "XAUUSD" else "XAUUSD"
     sym_gbp = "✅ GBPUSD" if cfg["SYMBOL"] == "GBPUSD" else "GBPUSD"
-    btn_xau = InlineKeyboardButton(sym_xau, callback_data="set_sym_XAUUSD")
-    btn_gbp = InlineKeyboardButton(sym_gbp, callback_data="set_sym_GBPUSD")
-    markup.row(btn_xau, btn_gbp)
+    markup.row(InlineKeyboardButton(sym_xau, callback_data="set_sym_XAUUSD"),
+               InlineKeyboardButton(sym_gbp, callback_data="set_sym_GBPUSD"))
 
     tf_1m = "✅ 1 دقيقة (1m)" if cfg["INTERVAL"] == "1m" else "1 دقيقة (1m)"
     tf_5m = "✅ 5 دقائق (5m)" if cfg["INTERVAL"] == "5m" else "5 دقائق (5m)"
-    btn_1m = InlineKeyboardButton(tf_1m, callback_data="set_tf_1m")
-    btn_5m = InlineKeyboardButton(tf_5m, callback_data="set_tf_5m")
-    markup.row(btn_1m, btn_5m)
+    markup.row(InlineKeyboardButton(tf_1m, callback_data="set_tf_1m"),
+               InlineKeyboardButton(tf_5m, callback_data="set_tf_5m"))
 
-    btn_status = InlineKeyboardButton("📊 جلب التحليل اللحظي الآن", callback_data="run_status")
-    markup.row(btn_status)
-
+    markup.row(InlineKeyboardButton("📊 جلب التحليل اللحظي الآن", callback_data="run_status"))
     return markup
 
-# ---------------- أوامر التليجرام التفاعلية ----------------
 @bot.message_handler(commands=['start', 'help', 'settings'])
 def send_welcome(message):
     cfg = get_user_config(message.chat.id)
@@ -279,13 +213,14 @@ def fetch_and_send_status(chat_id):
         res = analyze(k, kh)
         _, price, trend, zone = res[0], res[1], res[2], res[3]
         
+        formatted_price = format_price(cfg["SYMBOL"], price)
         trend_ar = "صاعد 📈" if trend == "bull" else ("هابط 📉" if trend == "bear" else "محايد ⚖️")
         zone_ar  = "خصم (القاع) 🟢" if zone == "discount" else ("علاوة (القمة) 🔴" if zone == "premium" else "محايدة ⚪")
 
         status_msg = (
             f"📊 **التقرير اللحظي - {cfg['SYMBOL']}**\n"
             f"----------------------------------------\n"
-            f"💰 **السعر الحالي:** `{price:.2f}`$\n"
+            f"💰 **السعر الحالي:** `{formatted_price}`\n"
             f"📈 **اتجاه HTF ({htf}):** {trend_ar}\n"
             f"📍 **المنطقة الحالية:** {zone_ar}\n"
             f"⏱ **فريم الدخول:** `{cfg['INTERVAL']}`\n"
@@ -296,7 +231,6 @@ def fetch_and_send_status(chat_id):
     except Exception as e:
         bot.send_message(chat_id, f"❌ حدث خطأ أثناء جلب البيانات: {e}")
 
-# ---------------- معالجة النقر على الأزرار (Callback Queries) ----------------
 @bot.callback_query_handler(func=lambda call: True)
 def callback_listener(call):
     chat_id = call.message.chat.id
@@ -327,64 +261,40 @@ def callback_listener(call):
         "👇 *يمكنك تغيير الزوج والفريم مباشرة عبر الأزرار أدناه:*"
     )
     try:
-        bot.edit_message_text(
-            new_text, 
-            chat_id, 
-            call.message.message_id,
-            reply_markup=build_settings_keyboard(chat_id), 
-            parse_mode="Markdown"
-        )
+        bot.edit_message_text(new_text, chat_id, call.message.message_id, reply_markup=build_settings_keyboard(chat_id), parse_mode="Markdown")
     except Exception:
         pass
 
-# ---------------- حلقة مراقبة السوق (Multithreading) ----------------
 def market_monitor_loop():
-    print("=== SMC PRO v3 | البوت يعمل بأسعار Spot الدقيقة والمطابقة للشارت ===")
-    last_signal_time = 0
+    print("=== SMC PRO v3.1 | يعمل بأسعار مطابقة وتنسيق دقيق ===")
     while True:
         try:
             target_chat_id = TELEGRAM_CHATID
             cfg = get_user_config(target_chat_id)
             htf = HTF_MAPPING[cfg["INTERVAL"]]
-
             k  = get_klines(cfg["SYMBOL"], cfg["INTERVAL"], LOOKBACK)
             kh = get_klines(cfg["SYMBOL"], htf, LOOKBACK)
-            
             res = analyze(k, kh)
-            now_str = datetime.datetime.now().strftime("%H:%M:%S")
-
-            if res[0]:
-                sig, sl, tp, price, trend, zone = res
-                if time.time() - last_signal_time > 3600:
-                    last_signal_time = time.time()
-                    rr = abs(tp - price) / abs(price - sl)
-                    alert(sig, price, sl, tp, rr, zone, cfg["SYMBOL"], target_chat_id)
-            else:
-                _, price, trend, zone = res
-                print(f"[{now_str}] [{cfg['SYMBOL']} | {cfg['INTERVAL']}] السعر: {price:.2f} | الاتجاه: {trend} | المنطقة: {zone}")
-            
+            _, price, _, _ = res
+            print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] [{cfg['SYMBOL']}] السعر: {format_price(cfg['SYMBOL'], price)}")
             time.sleep(CHECK_EVERY)
         except Exception as e:
-            print("تحذير في حلقة المراقبة:", e)
+            print("تحذير:", e)
             time.sleep(15)
 
-# ---------------- خادم وهمي لمنع إيقاف Render (Keep-Alive Server) ----------------
 def run_dummy_server():
     port = int(os.getenv("PORT", 8080))
     handler = socketserver.TCPServer(("", port), http.server.SimpleHTTPRequestHandler)
     handler.serve_forever()
 
-# ---------------- تشغيل التطبيق ----------------
 if __name__ == "__main__":
     threading.Thread(target=run_dummy_server, daemon=True).start()
-    
-    monitor_thread = threading.Thread(target=market_monitor_loop, daemon=True)
-    monitor_thread.start()
+    threading.Thread(target=market_monitor_loop, daemon=True).start()
 
-    print("جاري الاستماع للأوامر والأزرار من تليجرام...")
+    print("البوت قيد التشغيل ويستمع للأوامر...")
     while True:
         try:
             bot.infinity_polling(timeout=10, long_polling_timeout=5)
         except Exception as e:
-            print(f"حدث خطأ في الاتصال بالبوت، جاري إعادة المحاولة: {e}")
+            print(f"إعادة الاتصال: {e}")
             time.sleep(5)
